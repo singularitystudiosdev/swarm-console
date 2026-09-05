@@ -26,14 +26,17 @@ const CALLSIGNS = [
   "Tool-Repo", "gag.gg", "RobloxStudioTest", "COSMOSSS",
 ];
 
-/* filler identities past the real projects, up to the cap of 30 */
+/* filler identities past the real projects, numbered on repeat — the
+   swarm itself is unbounded */
 const FALLBACK_CALLSIGNS = ["HELIOS", "VESPER", "KESTREL", "ORION", "LYRA", "NOVA"];
 
 function agentName(i) {
-  return i < CALLSIGNS.length ? CALLSIGNS[i] : FALLBACK_CALLSIGNS[(i - CALLSIGNS.length) % FALLBACK_CALLSIGNS.length];
+  if (i < CALLSIGNS.length) return CALLSIGNS[i];
+  const j = i - CALLSIGNS.length;
+  const base = FALLBACK_CALLSIGNS[j % FALLBACK_CALLSIGNS.length];
+  const round = Math.floor(j / FALLBACK_CALLSIGNS.length);
+  return round > 0 ? `${base} ${round + 1}` : base;
 }
-
-const MAX_AGENTS = 30;
 
 const ACCENTS = ["#57ffa8", "#57d7ff", "#b18cff", "#ffd257", "#ff8d5d", "#5dffd2", "#ff5da2", "#c8ff5d"];
 
@@ -268,8 +271,7 @@ function layoutTargets() {
     /* the add-agent tile always occupies the slot right after the last
        agent — the 6th cell at 5 agents — so the grid is solved over
        liveCount + 1 slots (cell SIZE still keys off liveCount) */
-    const showAdd = liveCount < MAX_AGENTS;
-    const slots = liveCount + (showAdd ? 1 : 0);
+    const slots = liveCount + 1;
     let cols, rows, cw, ch;
     if (titleOnly) {
       /* chips ease from a comfy row at 26 agents down to a slim one at 30 */
@@ -301,12 +303,10 @@ function layoutTargets() {
         s: 1, o: 1, w: cw, h: ch, feat, node: p, zoomable: true,
       });
     });
-    if (showAdd) {
-      targets.set(ADD_ID, {
-        ...place(liveCount),
-        s: 1, o: 1, w: cw, h: ch, feat, node: ADD_NODE, zoomable: false,
-      });
-    }
+    targets.set(ADD_ID, {
+      ...place(liveCount),
+      s: 1, o: 1, w: cw, h: ch, feat, node: ADD_NODE, zoomable: false,
+    });
   } else {
     /* zoomed view: focus center-full, subagent columns flanking —
        all solved to fit the viewport together */
@@ -530,7 +530,6 @@ function makeAddEl(entry) {
    card comes back as it was), else append a fresh agent to the build */
 function addAgent() {
   if (focus) return; /* the tile only lives in the root view */
-  if (liveProjects().length >= MAX_AGENTS) return;
   let node;
   if (removed.size) {
     const idx = Math.min(...removed);
@@ -1065,7 +1064,7 @@ addEventListener("pointermove", (ev) => {
 /* ---------- agent count (deep links only — the add tile grows the
    swarm, the card ✕ shrinks it) ---------- */
 function setAgentCount(n) {
-  agentCount = Math.max(1, Math.min(MAX_AGENTS, n));
+  agentCount = Math.max(1, n);
   buildProjects();
   /* any count change zooms back out; a lone agent starts zoomed in */
   if (agentCount === 1) { refocus(projects[0]); return; }
@@ -1109,7 +1108,7 @@ if (params.get("debughead")) {
    activity line survives truncation — and prints a table into the DOM */
 if (params.get("sweep")) {
   const rows = [];
-  for (let n = 1; n <= MAX_AGENTS; n++) {
+  for (let n = 1; n <= 30; n++) { /* audit bounded even though the swarm is not */
     setAgentCount(n);
     tickActivity(); /* fill real activity text before measuring */
     let title = Infinity, act = Infinity, vis = Infinity;
