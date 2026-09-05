@@ -8,9 +8,14 @@
 </head>
 <body>
   <canvas id="stars"></canvas>
-  <canvas id="links"></canvas>
 
   <div id="world"></div>
+
+  <div id="hud">
+    <span class="hud-label">AGENTS</span>
+    <input id="agent-slider" type="range" min="1" max="30" step="1" value="5">
+    <span id="agent-count">5</span>
+  </div>
 
   <script src="app.js"></script>
 </body>
