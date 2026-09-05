@@ -26,7 +26,7 @@ const CALLSIGNS = [
   "Tool-Repo", "gag.gg", "RobloxStudioTest", "COSMOSSS",
 ];
 
-/* filler identities past the real projects, up to the slider cap of 30 */
+/* filler identities past the real projects, up to the cap of 30 */
 const FALLBACK_CALLSIGNS = ["HELIOS", "VESPER", "KESTREL", "ORION", "LYRA", "NOVA"];
 
 function agentName(i) {
@@ -103,8 +103,9 @@ const TOOLS = [
    Rule: at every agent count, a normal person must be able to READ the
    card at a glance — if not, compact it and drop information.
      1 agent  -> full chat: thread + input + footer
-     2 agents -> compact chat: thread only, no input/footer
-     3+       -> summary card: title + subagents + one "what it's doing" line
+     2-9      -> compact chat: thread + input, smaller text
+     10-25    -> mini-thread chat: thread + brief, no input past 9
+     26-30    -> title chip: title + subagents only
    Width still falls off continuously so the grid scales smoothly. */
 let agentCount = 5;
 
@@ -114,32 +115,40 @@ function frameWFor(n) {
 
 /* context level is a function of the agent COUNT. Text never scales
    above native; extra room converts into MORE CONTEXT instead:
-   1  full chat (input + footer)   2  chat thread
-   3-12 compact mini-thread        13-30 summary card */
+   1-9 chat (thread + input + footer)
+   10-25 mini-thread chat (input only through 9)
+   26-30 title chip (title + subagents only) */
 function featuresForCount(n) {
   return {
-    input:    n <= 5,   // chat composer attached: talk to the agent directly
-    thread:   n <= 12,            // message thread (mini + compact text from 3)
-    brief:    n <= 26,            // project brief line
+    input:    n <= 9,   // chat composer attached: talk to the agent directly
+    thread:   n <= 25,            // message thread (mini + compact text from 3)
+    brief:    n <= 25,            // project brief line
     chip:     n <= 1,
-    status:   n <= 12,
-    activity: n >= 13 && n <= 22, // one-line "what it's doing"
+    status:   false,              // RUNNING/THINKING pill retired from heads
+    activity: false,              // retired — 13-24 show the chat thread instead
     compact:  n >= 3,             // smaller message text on mini threads
   };
 }
+
+/* under-view cards: mini thread only — the feed stays, the composer goes */
+const KID_FEAT = { ...featuresForCount(2), input: false };
+
+/* the add-agent tile: a virtual grid member, not an agent — it always
+   takes the next open cell and spawns an agent when pressed */
+const ADD_ID = "__add";
+const ADD_NODE = { id: ADD_ID, isAdd: true, status: "" };
 
 /* ---------- node model ---------- */
 let NEXT_ID = 1;
 const MAX_DEPTH = 7;
 
-function makeNode({ name, brief, accent, depth, parent, seed, isRoot, subCount }) {
+function makeNode({ name, brief, accent, depth, parent, seed, isRoot }) {
   const rng = makeRng(seed);
   return {
     id: "n" + (NEXT_ID++),
     name, brief, accent,
     depth, parent,
     isRoot: !!isRoot,
-    subCount: subCount || 0,
     rngSeed: seed,
     status: "running",
     bornAt: performance.now(),
@@ -155,23 +164,24 @@ function makeNode({ name, brief, accent, depth, parent, seed, isRoot, subCount }
   };
 }
 
-function childCountFor(node, rng) {
+function childCountFor(node) {
   if (node.depth >= MAX_DEPTH) return 0;
-  if (node.depth === 0) return node.subCount;
-  return 1 + Math.floor(rng() * 4);                          // 1-4 below
+  const rng = makeRng(node.rngSeed * 53 + 29);
+  if (node.depth === 0) return Math.floor(rng() * 8);      // grid agents: 0-7 crew
+  return rng() < 0.75 ? 0 : 1 + Math.floor(rng() * 2);     // subagents: mostly none, a few 1-2
 }
 
 function ensureChildren(node) {
   if (node.children) return node.children;
   const rng = makeRng(node.rngSeed * 7 + 13);
-  const n = childCountFor(node, rng);
+  const n = childCountFor(node);
   node.children = [];
   for (let i = 0; i < n; i++) {
     const role = ROLES[Math.floor(rng() * ROLES.length)];
     const glyph = GLYPHS[Math.floor(rng() * GLYPHS.length)];
     const kid = makeNode({
       name: `${role}-${glyph}`,
-      brief: `spawned by ${node.name.toLowerCase()} · task ${i + 1}`,
+      brief: null,             // spawned cards show no brief line
       accent: node.accent,
       depth: node.depth + 1,
       parent: node,
@@ -210,27 +220,33 @@ const sctx = starsCv.getContext("2d");
 
 let W = 0, H = 0, DPR = 1;
 
-/* root agents — rebuilt whenever the slider moves */
+/* root agents — rebuilt whenever the count changes */
 let projects = [];
+let removed = new Set();   // build indexes closed via the card ✕
+
+function makeRootAgent(i) {
+  return makeNode({
+    name: agentName(i),
+    brief: BRIEFS[(i * 7 + 3) % BRIEFS.length],
+    accent: ACCENTS[i % ACCENTS.length],
+    depth: 0, parent: null, seed: (1101 + i * 777) >>> 0, isRoot: true,
+  });
+}
 
 function buildProjects() {
   projects = [];
-  for (let i = 0; i < agentCount; i++) {
-    const seed = (1101 + i * 777) >>> 0;
-    const rng = makeRng(seed * 3 + 11);
-    projects.push(makeNode({
-      name: agentName(i),
-      brief: BRIEFS[(i * 7 + 3) % BRIEFS.length],
-      accent: ACCENTS[i % ACCENTS.length],
-      depth: 0, parent: null, seed, isRoot: true,
-      subCount: 1 + Math.floor(rng() * 8),   // 1-8 subagents per agent
-    }));
-  }
+  removed.clear();
+  for (let i = 0; i < agentCount; i++) projects.push(makeRootAgent(i));
+}
+
+/* agents still on the board (a ✕ click removes from the build) */
+function liveProjects() {
+  return projects.filter((_, i) => !removed.has(i));
 }
 
 let focus = null;          // null = root view
+let lastFocus = null;      // agent last zoomed into — its grid card reads LAST SEEN
 let entries = new Map();   // id -> entry
-const pan = { x: 0, y: 0 }; // drag-to-pan camera offset
 
 /* ---------- layout ---------- */
 function layoutTargets() {
@@ -240,53 +256,75 @@ function layoutTargets() {
     const cx = W / 2, cy = H / 2;
     const g = 28;              // gutter between cards
     const tw = W * 0.86, th = H * 0.86;
+    const live = liveProjects();
+    const liveCount = live.length;
 
     /* one solver for every count: pick the grid shape, size each card to
        its cell, and let the content fill it — thread cards flex, summary
        cards zoom their content to fill, title-only chips keep a comfy
        fixed width so the densest grid stays readable */
-    const feat = featuresForCount(agentCount);
+    const feat = featuresForCount(liveCount);
     const titleOnly = !feat.thread && !feat.brief && !feat.activity;
+    /* the add-agent tile always occupies the slot right after the last
+       agent — the 6th cell at 5 agents — so the grid is solved over
+       liveCount + 1 slots (cell SIZE still keys off liveCount) */
+    const showAdd = liveCount < MAX_AGENTS;
+    const slots = liveCount + (showAdd ? 1 : 0);
     let cols, rows, cw, ch;
     if (titleOnly) {
-      /* chips start at the brief-card height and ease down to a slim row */
+      /* chips ease from a comfy row at 26 agents down to a slim one at 30 */
       cw = 340;
-      cols = Math.max(1, Math.min(agentCount, Math.floor((tw + g) / (cw + g))));
-      rows = Math.ceil(agentCount / cols);
-      ch = Math.round(88 - (88 - 36) * Math.max(0, Math.min(1, (agentCount - 26) / 4)));
+      cols = Math.max(1, Math.min(liveCount, Math.floor((tw + g) / (cw + g))));
+      rows = Math.ceil(slots / cols);
+      ch = Math.round(56 - (56 - 36) * Math.max(0, Math.min(1, (liveCount - 26) / 4)));
     } else {
-      const A = feat.thread || agentCount > 26 ? 1.5 : 3.2;
-      cols = Math.max(1, Math.min(agentCount,
-        Math.round(Math.sqrt(agentCount * tw / (th * A)))));
-      rows = Math.ceil(agentCount / cols);
+      const A = feat.thread ? 1.5 : 3.2;
+      cols = Math.max(1, Math.min(liveCount,
+        Math.round(Math.sqrt(liveCount * tw / (th * A)))));
+      rows = Math.ceil(slots / cols);
       cw = Math.round((tw - (cols - 1) * g) / cols);
       ch = Math.round((th - (rows - 1) * g) / rows);
     }
 
-    projects.forEach((p, i) => {
+    const place = (i) => {
       const row = Math.floor(i / cols), col = i % cols;
-      const inRow = Math.min(cols, agentCount - row * cols);
+      const inRow = Math.min(cols, slots - row * cols);
       const rowOffsetX = ((cols - inRow) * (cw + g)) / 2;
-      targets.set(p.id, {
+      return {
         x: cx - ((cols - 1) * (cw + g)) / 2 + rowOffsetX + col * (cw + g),
         y: cy - ((rows - 1) * (ch + g)) / 2 + row * (ch + g),
+      };
+    };
+    live.forEach((p, i) => {
+      targets.set(p.id, {
+        ...place(i),
         s: 1, o: 1, w: cw, h: ch, feat, node: p, zoomable: true,
       });
     });
+    if (showAdd) {
+      targets.set(ADD_ID, {
+        ...place(liveCount),
+        s: 1, o: 1, w: cw, h: ch, feat, node: ADD_NODE, zoomable: false,
+      });
+    }
   } else {
     /* zoomed view: focus center-full, subagent columns flanking —
        all solved to fit the viewport together */
     const cx = W / 2, cy = H / 2;
+    const kids = ensureChildren(focus);
     const columns = [[], []]; // [right, left]
-    ensureChildren(focus).forEach((k, i) => columns[i % 2].push(k));
+    kids.forEach((k, i) => columns[i % 2].push(k));
     const maxCol = Math.max(columns[0].length, columns[1].length, 1);
 
-    const kw = 300, kh = 120;            // kid card design size
+    const kw = 300, kh = 210;            // kid card design size (thread + composer)
     const minGap = 16;
     const availH = H * 0.92;
     const neededH = maxCol * kh + (maxCol - 1) * minGap;
-    /* narrow the focus card so both side columns fit at native size */
-    const fw = Math.max(560, Math.min(frameWFor(1), W - 2 * (kw + 96)));
+    /* no crew: the focus card takes the width it would get alone;
+       otherwise narrow it so both side columns fit at native size */
+    const fw = kids.length === 0
+      ? Math.min(frameWFor(1), W * 0.9)
+      : Math.max(560, Math.min(frameWFor(1), W - 2 * (kw + 96)));
     const sideW = (W - fw) / 2 - 40;
     const s = Math.max(0.5, Math.min(1, availH / neededH, sideW / kw));
     const gap = kh * s + Math.max(minGap, Math.min(72,
@@ -301,7 +339,7 @@ function layoutTargets() {
         targets.set(k.id, {
           x: cx + (side === 0 ? mx : -mx),
           y: cy + (row - (m - 1) / 2) * gap,
-          s, o: 1, w: kw, h: kh, feat: featuresForCount(13), node: k, zoomable: true,
+          s, o: 1, w: kw, h: kh, feat: KID_FEAT, node: k, zoomable: true,
           parentAnchorId: focus.id,
         });
       });
@@ -311,7 +349,16 @@ function layoutTargets() {
 }
 
 /* ---------- entry lifecycle ---------- */
+function setSubcount(el, count) {
+  el.querySelectorAll("[data-subcount]").forEach((n) => {
+    n.innerHTML = count === 0
+      ? `⬡ 0 <span class="f-sub-l">SUBAGENTS · STANDBY</span>`
+      : `⬡ ${count} <span class="f-sub-l">SUBAGENTS</span>`;
+  });
+}
+
 function makeEl(entry) {
+  if (entry.node.isAdd) return makeAddEl(entry);
   const el = document.createElement("div");
   el.className = "node";
   el.dataset.status = entry.node.status || "";
@@ -321,11 +368,13 @@ function makeEl(entry) {
         <div class="frame-head">
           <span class="led led-run" data-led></span>
           <span class="f-title">${entry.node.name}</span>
+          <span class="f-lastseen">LAST SEEN</span>
           <span class="f-status" data-fstatus>RUNNING</span>
           <span class="f-sub" data-subcount>⬡ — SUBAGENTS</span>
           <span class="f-chip">glm-5.3-flash</span>
+          <button class="f-close" title="Close agent" aria-label="Close agent">✕</button>
         </div>
-        <div class="frame-sub">${entry.node.brief}</div>
+        ${entry.node.brief ? `<div class="frame-sub">${entry.node.brief}</div>` : ""}
         <div class="f-activity" data-activity>booting…</div>
         <div class="thread" data-thread></div>
         <div class="frame-foot">
@@ -362,13 +411,12 @@ function makeEl(entry) {
       </div>`;
     buildThread(entry.node, el.querySelector("[data-thread]"));
     wireInput(entry.node, el);
-    const kc = ensureChildren(entry.node).length;
-    el.querySelectorAll("[data-subcount]").forEach((n) => {
-      /* the label span hides on summary cards, where the head is zoomed */
-      n.innerHTML = kc === 0
-        ? `⬡ 0 <span class="f-sub-l">SUBAGENTS · STANDBY</span>`
-        : `⬡ ${kc} <span class="f-sub-l">SUBAGENTS</span>`;
-    });
+    const closeBtn = el.querySelector(".f-close");
+    /* keep the document gesture handlers from seeing the ✕ as a card click */
+    ["pointerdown", "pointerup"].forEach((t) =>
+      closeBtn.addEventListener(t, (ev) => ev.stopPropagation()));
+    closeBtn.addEventListener("click", () => removeNode(entry.node));
+    setSubcount(el, ensureChildren(entry.node).length);
   }
   worldEl.appendChild(el);
   return el;
@@ -377,19 +425,31 @@ function makeEl(entry) {
 function applyFeatures(entry) {
   const el = entry.el;
   const frame = el.querySelector(".frame");
+  if (entry.node.isAdd) {
+    frame.style.width = Math.round(entry.w) + "px";
+    frame.style.height = entry.h ? Math.round(entry.h) + "px" : "";
+    /* chip tier: the cell is head-height — collapse to just the plus */
+    frame.classList.toggle("add-slim", entry.h < 64);
+    return;
+  }
   const f = entry.feat;
+  const titleOnly = !f.thread && !f.brief && !f.activity;
   frame.style.width = Math.round(entry.w) + "px";
   frame.style.height = entry.h ? Math.round(entry.h) + "px" : "";
   frame.style.maxHeight = "";
-  /* summary cards zoom their content to fill the cell (title grows too),
-     capped so the densest grids keep native-size text */
-  if (f.activity || (f.brief && !f.thread)) {
-    const contentH = 30 + (f.brief ? 28 : 0) + (f.activity ? 30 : 0);
-    const cz = Math.max(1, Math.min(2.2, entry.w / 260, entry.h / contentH));
-    frame.style.setProperty("--cz", cz.toFixed(3));
+  /* title chips keep the frame at cell size and scale the HEAD up to
+     fill it — zoom measured from the head's natural width so every
+     name fits, short ones filling the whole cell */
+  if (titleOnly) {
+    const head = el.querySelector(".frame-head");
+    frame.style.setProperty("--cz", "1");
+    const natural = head.scrollWidth;
+    frame.style.setProperty("--cz",
+      Math.max(1, Math.min(2.2, entry.h / 30, entry.w / Math.max(1, natural))).toFixed(3));
   } else {
     frame.style.setProperty("--cz", "1");
   }
+  frame.classList.toggle("fx-titlechip", titleOnly);
   frame.classList.toggle("fx-input", f.input);
   frame.classList.toggle("fx-thread", f.thread);
   frame.classList.toggle("fx-brief", f.brief);
@@ -398,7 +458,9 @@ function applyFeatures(entry) {
   frame.classList.toggle("fx-status", f.status);
   frame.classList.toggle("fx-compact", f.compact);
   el.classList.toggle("focused", entry.node === focus);
+  el.classList.toggle("last-seen", entry.node === lastFocus && entry.node !== focus);
   el.classList.toggle("zoomable", !!entry.zoomable);
+  el.classList.toggle("kid", entry.node.depth > 0);
 }
 
 function syncEntries(targets) {
@@ -445,12 +507,89 @@ function destroyEl(e) {
   entries.delete(e.id);
 }
 
+function makeAddEl(entry) {
+  const el = document.createElement("div");
+  el.className = "node add-tile";
+  el.innerHTML = `
+    <div class="frame add-frame">
+      <button class="add-btn" title="Add agent" aria-label="Add agent">
+        <span class="add-plus">＋</span>
+        <span class="add-label">New agent</span>
+      </button>
+    </div>`;
+  const btn = el.querySelector(".add-btn");
+  /* keep the document gesture handlers from seeing the tile as a card click */
+  ["pointerdown", "pointerup"].forEach((t) =>
+    btn.addEventListener(t, (ev) => ev.stopPropagation()));
+  btn.addEventListener("click", (ev) => { ev.stopPropagation(); addAgent(); });
+  worldEl.appendChild(el);
+  return el;
+}
+
+/* the add tile pressed: restore the lowest closed build slot first (its
+   card comes back as it was), else append a fresh agent to the build */
+function addAgent() {
+  if (focus) return; /* the tile only lives in the root view */
+  if (liveProjects().length >= MAX_AGENTS) return;
+  let node;
+  if (removed.size) {
+    const idx = Math.min(...removed);
+    removed.delete(idx);
+    node = projects[idx];
+  } else {
+    node = makeRootAgent(projects.length);
+    projects.push(node);
+  }
+  const live = liveProjects();
+  agentCount = Math.max(agentCount, live.length);
+  layoutTargetsAndSync();
+  /* keyboard flow: land focus on the new card's composer when it has one */
+  const e = entries.get(node.id);
+  const input = e && e.el.querySelector("[data-input]");
+  if (input) input.focus();
+}
+
 function refocus(newFocus) {
   /* with a lone agent there is no root view to return to — stay zoomed in */
   if (!newFocus && agentCount === 1) newFocus = projects[0];
   focus = newFocus;
+  if (focus) lastFocus = focus;
   if (focus) ensureChildren(focus);
   layoutTargetsAndSync();
+}
+
+/* zoom-out cooldown: zooming IN is always instant; consecutive zoom-outs
+   wait 300ms so a stray scroll or swipe cannot chain them */
+const ZOOM_COOLDOWN_MS = 300;
+let lastZoomOutAt = -1e9;
+function canZoomOut() { return performance.now() - lastZoomOutAt >= ZOOM_COOLDOWN_MS; }
+function zoomOutLayer() {
+  if (!focus || !canZoomOut()) return;
+  lastZoomOutAt = performance.now();
+  refocus(focus.parent || null);
+}
+
+/* the ✕ on a card closes that agent: grid agents leave the constellation,
+   subagents leave their parent's crew; closing the focused card steps out */
+function removeNode(node) {
+  if (node.isRoot) {
+    const idx = projects.indexOf(node);
+    if (idx < 0 || removed.has(idx) || liveProjects().length <= 1) return;
+    removed.add(idx);
+  } else if (node.parent && node.parent.children) {
+    const sibs = node.parent.children;
+    const at = sibs.indexOf(node);
+    if (at >= 0) sibs.splice(at, 1);
+  }
+  if (focus === node) focus = node.parent || null;
+  if (lastFocus === node) lastFocus = null;
+  /* a crew shrank under the focused card — refresh its ⬡ count */
+  if (focus && focus.children) {
+    const fe = entries.get(focus.id);
+    if (fe) setSubcount(fe.el, focus.children.length);
+  }
+  layoutTargetsAndSync();
+  if (!focus && liveProjects().length === 1) refocus(liveProjects()[0]);
 }
 
 function layoutTargetsAndSync() {
@@ -733,7 +872,11 @@ function segRectSpan(x1, y1, x2, y2, rc) {
 function rectAround(entry, sel) {
   const el = entry.el.querySelector(sel);
   if (!el) return null;
-  return { x: entry.cur.x - el.offsetWidth / 2, y: entry.cur.y - el.offsetHeight / 2, w: el.offsetWidth, h: el.offsetHeight };
+  /* the frame renders at design size * cur.s — measure it scaled,
+     or the clip rect overhangs and eats the link line */
+  const s = entry.cur.s || 1;
+  const w = el.offsetWidth * s, h = el.offsetHeight * s;
+  return { x: entry.cur.x - w / 2, y: entry.cur.y - h / 2, w, h };
 }
 
 function tickLinks() {
@@ -764,7 +907,7 @@ function tickLinks() {
     line.setAttribute("y1", (y1 + dy * t0).toFixed(1));
     line.setAttribute("x2", (x1 + dx * t1).toFixed(1));
     line.setAttribute("y2", (y1 + dy * t1).toFixed(1));
-    line.style.stroke = `color-mix(in srgb, ${e.node.accent} 35%, transparent)`;
+    line.style.stroke = "color-mix(in srgb, #ffffff 17.5%, transparent)";
     line.setAttribute("opacity", (0.4 + 0.6 * e.cur.o).toFixed(3));
   }
   for (const [id, line] of linkPool) {
@@ -776,7 +919,6 @@ function tickLinks() {
 let lastT = performance.now();
 let statTimer = 0;
 const actTick = { last: 0 };
-
 function frame(now) {
   const dt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
@@ -786,7 +928,7 @@ function frame(now) {
      (a hover lift would overlap the cell-packed neighbors) */
   for (const e of entries.values()) {
     let ts = e.target.s, to = e.target.o;
-    const tx = e.target.x + pan.x, ty = e.target.y + pan.y;
+    const tx = e.target.x, ty = e.target.y;
     if (e.ghost) to = 0;
     const k = 1 - Math.exp(-dt * 5);
     e.cur.x += (tx - e.cur.x) * k;
@@ -825,24 +967,26 @@ function frame(now) {
 
 /* ---------- input: click / wheel / keys ---------- */
 function pickNodeAt(x, y) {
-  let best = null, bestD = 1e9;
+  /* strict box hit: only a click inside a card's rendered rect counts —
+     the void beside a card belongs to the canvas (zoom-out), not the card */
   for (const e of entries.values()) {
     if (!e.zoomable || e.dying || e.ghost) continue;
     const p = screenPosOf(e.id);
     if (!p) continue;
-    const d = Math.hypot(p.x - x, p.y - y);
-    const rad = 170 * e.cur.s + 50;
-    if (d < rad && d < bestD) { best = e; bestD = d; }
+    const hw = (e.w * e.cur.s) / 2, hh = (e.h * e.cur.s) / 2;
+    if (Math.abs(x - p.x) <= hw && Math.abs(y - p.y) <= hh) return e;
   }
-  return best;
+  return null;
 }
 
-/* drag-to-pan: a press on the void (or an unfocused frame) drags the
-   constellation; a press that releases without moving counts as a click */
+/* swipe-to-zoom-out: a press on the void (or an unfocused frame) starts a
+   gesture; a rightward swipe zooms out one layer, a release without moving
+   counts as a click. The world itself never pans. */
 let drag = null;
+const SWIPE_OUT_PX = 70;
 
-function hudHit(ev) {
-  return ev.target.closest(".frame, #hud");
+function frameHit(ev) {
+  return ev.target.closest(".frame");
 }
 
 function frameEntryFromEvent(ev) {
@@ -855,39 +999,43 @@ function frameEntryFromEvent(ev) {
 }
 
 addEventListener("pointerdown", (ev) => {
-  /* the chat composer never pans, never zooms — it is just for typing */
-  if (ev.target.closest("#hud, .composer")) return;
+  /* the chat composer never swipes, never zooms — it is just for typing */
+  if (ev.target.closest(".composer")) return;
   const fe = frameEntryFromEvent(ev);
   if (fe && fe.node === focus) return; /* focused frame is interactive */
-  drag = { x: ev.clientX, y: ev.clientY, px: pan.x, py: pan.y, moved: false };
+  drag = { x: ev.clientX, y: ev.clientY, moved: false };
 });
 
 addEventListener("pointermove", (ev) => {
-  if (drag) {
-    const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
-    if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 6) {
-      drag.moved = true;
-      document.body.style.cursor = "grabbing";
-    }
-    if (drag.moved) { pan.x = drag.px + dx; pan.y = drag.py + dy; }
+  if (drag && !drag.moved
+      && Math.abs(ev.clientX - drag.x) + Math.abs(ev.clientY - drag.y) > 6) {
+    drag.moved = true;
   }
 });
 
 addEventListener("pointerup", (ev) => {
   const d = drag;
   drag = null;
-  document.body.style.cursor = "default";
-  if (!d || d.moved) return;
+  if (!d) return;
+  if (d.moved) {
+    /* a decisive rightward swipe zooms out one layer */
+    const dx = ev.clientX - d.x, dy = ev.clientY - d.y;
+    if (dx > SWIPE_OUT_PX && dx > Math.abs(dy) * 1.5) zoomOutLayer();
+    return;
+  }
   /* a click on any zoomable agent focuses it, even through its frame */
   const hit = pickNodeAt(ev.clientX, ev.clientY);
   if (hit && hit.node !== focus) { refocus(hit.node); return; }
-  if (hudHit(ev)) return; /* inside the focused frame or the HUD */
+  if (frameHit(ev)) return; /* inside a frame (the tile button handles its own clicks) */
   /* void click: zoom out one layer */
-  if (focus) refocus(focus.parent || null);
+  zoomOutLayer();
 });
 
 document.addEventListener("wheel", (ev) => {
-  if (ev.target.closest && ev.target.closest("#hud")) return;
+  /* wheel inside the focused frame never zooms — zooming out is for the
+     canvas outside the frame (thread keeps its own native scroll) */
+  const fe = frameEntryFromEvent(ev);
+  if (focus && fe && fe.node === focus) return;
   /* let an inner thread consume the scroll when it still has room */
   const th = ev.target && ev.target.closest ? ev.target.closest(".thread") : null;
   if (th) {
@@ -897,47 +1045,32 @@ document.addEventListener("wheel", (ev) => {
     if (canScroll) return;
   }
   /* scroll only zooms OUT; zooming IN is click-only */
-  if (ev.deltaY > 0 && focus) refocus(focus.parent || null);
+  if (ev.deltaY > 0) zoomOutLayer();
 }, { passive: true });
 
 const mouse = { x: innerWidth / 2, y: innerHeight / 2 };
 addEventListener("pointermove", (ev) => { mouse.x = ev.clientX; mouse.y = ev.clientY; });
 
 addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && focus) refocus(focus.parent || null);
+  if (ev.key === "Escape") zoomOutLayer();
 });
 
 /* hover cursor */
 addEventListener("pointermove", (ev) => {
-  if (drag && drag.moved) return; /* grabbing cursor already set */
   const hit = pickNodeAt(ev.clientX, ev.clientY);
-  document.body.style.cursor = hit ? "pointer" : (ev.target.closest(".frame") ? "default" : "grab");
+  document.body.style.cursor = hit ? "pointer" : "default";
   for (const e of entries.values()) e.hover = hit === e ? 1 : 0;
 });
 
-/* ---------- agent-count slider ---------- */
-const slider = document.getElementById("agent-slider");
-const agentCountEl = document.getElementById("agent-count");
-
+/* ---------- agent count (deep links only — the add tile grows the
+   swarm, the card ✕ shrinks it) ---------- */
 function setAgentCount(n) {
   agentCount = Math.max(1, Math.min(MAX_AGENTS, n));
-  slider.value = String(agentCount);
-  agentCountEl.textContent = String(agentCount);
   buildProjects();
-  /* a lone agent starts zoomed in — the root view IS its focus view */
+  /* any count change zooms back out; a lone agent starts zoomed in */
   if (agentCount === 1) { refocus(projects[0]); return; }
-  const prev = focus;
-  if (prev) {
-    const again = projects.find((p) => p.name === prev.name);
-    refocus(again || null);
-  } else {
-    layoutTargetsAndSync();
-  }
+  refocus(null);
 }
-
-slider.addEventListener("input", () => setAgentCount(+slider.value));
-slider.addEventListener("pointerdown", (ev) => ev.stopPropagation());
-slider.addEventListener("pointerup", (ev) => ev.stopPropagation());
 
 /* ---------- resize ---------- */
 function resize() {
@@ -962,6 +1095,14 @@ else layoutTargetsAndSync(); /* plain load: resize() synced before projects exis
 const bootFocus = params.get("focus");
 const bootProject = bootFocus && projects.find((p) => p.name.toLowerCase() === bootFocus.toLowerCase());
 if (bootProject) refocus(bootProject);
+
+/* ?debughead: write card head measurements into document.title */
+if (params.get("debughead")) {
+  setInterval(() => {
+    const t = document.querySelector(".frame .f-title");
+    if (t) document.title = `w${t.clientWidth} sw${t.scrollWidth} head${t.parentElement.clientWidth}`;
+  }, 500);
+}
 
 /* legibility audit (?sweep=1): measures every agent level — effective
    on-screen text size (font x grid-fit scale) and how much of the
